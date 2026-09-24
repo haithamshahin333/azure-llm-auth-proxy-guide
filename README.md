@@ -126,6 +126,37 @@ gateway URL and make the sidecar mint the token the gateway validates: path A wi
 application scope, or path B against the gateway's own token endpoint. LangSmith is configured the same way in every
 case, because it only ever talks to the proxy. How the path is assembled is the next section.
 
+**What the sidecar does, as a curl.** Path B is one HTTP call, the OAuth2 client-credentials request, and the sidecar's only
+job is to cache its answer and repeat it two minutes before the token expires:
+
+```bash
+curl -s -X POST "https://login.microsoftonline.com/<tenant-id>/oauth2/v2.0/token" \
+  --data-urlencode "grant_type=client_credentials" \
+  --data-urlencode "client_id=<client-id>" \
+  --data-urlencode "client_secret@<secret-file>" \
+  --data-urlencode "scope=https://cognitiveservices.azure.com/.default"
+```
+```json
+{"token_type": "Bearer", "expires_in": 3599, "ext_expires_in": 3599, "access_token": "eyJ0eXAiOiJKV1Qi…"}
+```
+
+The `@` makes curl read the secret from the file, so it never appears on the command line. The sidecar keeps
+`access_token` and `expires_in`; Envoy then sends `access_token` upstream, which is this second call:
+
+```bash
+TOKEN=$(curl -s -X POST "https://login.microsoftonline.com/<tenant-id>/oauth2/v2.0/token" \
+  --data-urlencode "grant_type=client_credentials" --data-urlencode "client_id=<client-id>" \
+  --data-urlencode "client_secret@<secret-file>" --data-urlencode "scope=https://cognitiveservices.azure.com/.default" | jq -r .access_token)
+curl -s "https://<foundry-account>.openai.azure.com/openai/v1/responses" -H "Authorization: Bearer $TOKEN" \
+  -H "content-type: application/json" -d '{"model":"<deployment-name>","input":"Reply with the single word pong."}'
+```
+
+Run together, the two commands prove the app registration, its secret and its role assignment with no LangSmith and no
+proxy involved: a useful check before step 1B. Path A is the same token request with `client_secret` replaced by
+`client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer` and `client_assertion=<the token file
+Kubernetes projects into the pod>`, and the managed identity's client id. It cannot be run from a laptop because that
+assertion only exists inside the pod.
+
 ## URLs and paths: what goes where
 
 Three configuration points contribute to a model call's URL: the model configuration's Base URL, the client library, and
@@ -208,7 +239,8 @@ Note two values for step 5: `az identity show -n <identity> -g <rg> --query clie
 `az account show --query tenantId -o tsv`. A new principal can take a few minutes to become visible to RBAC.
 
 **Path B: client credentials.** You own the app registration (or the gateway client). Grant its service principal the
-same role and put the client secret in a Kubernetes Secret, through a file rather than a command-line argument so the
+same role and put the client secret in a Kubernetes Secret (the two curl commands in [Two ways](#two-ways-the-proxy-authenticates-to-azure)
+check the identity and role before you install anything), through a file rather than a command-line argument so the
 secret never lands in your shell history:
 
 ```bash
