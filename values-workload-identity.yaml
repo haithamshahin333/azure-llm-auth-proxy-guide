@@ -1,0 +1,54 @@
+# LangSmith LLM auth proxy -> Azure AI Foundry, authenticating as a user-assigned managed identity (AKS workload identity).
+# Values for the upstream chart langchain/langsmith-auth-proxy (pinned 0.0.15). Fill in every <placeholder>, then:
+#   helm upgrade --install llm-auth-proxy langchain/langsmith-auth-proxy --version 0.0.15 \
+#     -n <namespace> --create-namespace -f values-workload-identity.yaml --wait --timeout 3m
+# One pod: Envoy validates the LangSmith JWT, asks the sidecar for the upstream Authorization header and forwards the
+# request to Foundry. The pod is Ready only once the sidecar has minted a token, so --wait fails on a broken identity.
+fullnameOverride: llm                          # every object renders as llm-auth-proxy (Service, ServiceAccount, Deployment)
+authProxy:
+  # WHERE THE MODEL REQUEST GOES. Foundry directly: https://<foundry-account>.openai.azure.com, no path. (The account's endpoint
+  # shown by Azure may end in .cognitiveservices.azure.com; use the .openai.azure.com form here.)
+  # A gateway in front of the model provider instead: https://<gateway-host>[/<base-path>]; the request path is appended after
+  # the base path, Host/SNI are rewritten to that host, and TOKEN_SCOPE below must be what the gateway validates (README).
+  upstream: "https://<foundry-account>.openai.azure.com"
+  jwtIssuer: "langsmith:self-hosted:<yours>"               # must equal config.llmAuthProxyIssuer in langsmith-values.yaml
+  jwtAudiences: ["llm-auth-proxy"]                         # must equal "JWT audience" in the LangSmith organization setting
+  # Public signing key, fetched in-cluster from the LangSmith frontend Service (kubectl get svc -n <langsmith-namespace> | grep frontend).
+  jwksUri: "http://<langsmith-release>-frontend.<langsmith-namespace>.svc.cluster.local:80/.well-known/jwks.json"
+  jwksCacheDurationSeconds: 300
+  extAuthz:
+    enabled: true
+    serviceUrl: "http://localhost:10002"       # the sidecar below; Envoy calls <serviceUrl>/check<path> for every request
+    timeout: "10s"
+  serviceAccount:
+    annotations:
+      azure.workload.identity/client-id: "<identity-client-id>"   # az identity show -n <identity> -g <rg> --query clientId
+      azure.workload.identity/tenant-id: "<tenant-id>"            # az account show --query tenantId
+  deployment:
+    replicas: 1                                # raise it, or enable authProxy.autoscaling.hpa, for production
+    labels:
+      azure.workload.identity/use: "true"      # the AKS webhook injects the projected token and AZURE_* env into every container
+    sidecars:
+      - name: authz
+        image: "<registry>/langsmith-llm-authz:1"   # built from authz/Dockerfile (README step 4)
+        # env:                                 # optional
+        #   - name: TOKEN_SCOPE                # token scope, default https://cognitiveservices.azure.com/.default; set it for a
+        #     value: "api://<gateway-app-id>/.default"   # sovereign cloud, or to the audience a gateway upstream validates
+        #   - name: LOG_HEADERS                # every call logs the forwarded headers (credentials redacted) and the JWT claims;
+        #     value: "false"                   # set false for a compact line
+        ports:
+          - name: authz
+            containerPort: 10002
+        readinessProbe:                        # 200 only when a token was minted (cached: one real request per token lifetime)
+          httpGet: { path: /healthz, port: 10002 }
+          initialDelaySeconds: 3
+          periodSeconds: 10
+          timeoutSeconds: 15                   # a first mint can take a few seconds
+          failureThreshold: 3
+        resources:
+          requests: { cpu: 50m, memory: 64Mi }
+          limits: { memory: 128Mi }
+ingress:
+  enabled: false                               # in-cluster only; see README "Operations" for TLS
+gateway:
+  enabled: false

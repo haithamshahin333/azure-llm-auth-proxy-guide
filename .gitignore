@@ -1,0 +1,8 @@
+# Never commit the LangSmith signing key or a client secret written next to this guide (README steps 1 and 2).
+signing-jwks.json
+*.pem
+*.jwk
+*.secret
+# Local noise
+__pycache__/
+.DS_Store

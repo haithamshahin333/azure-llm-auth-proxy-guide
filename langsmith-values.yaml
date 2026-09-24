@@ -1,0 +1,83 @@
+# Overlay for YOUR LangSmith Helm release (chart 0.16 or later). It contains everything LangSmith needs to call the LLM
+# auth proxy at its in-cluster Service URL http://llm-auth-proxy.<namespace>.svc.cluster.local:10000 (plain http, a
+# *.svc.cluster.local name, a private ClusterIP; <namespace> = where the proxy is installed).
+#
+# Apply it AFTER your own values, together with the signing key from step 2 of the README:
+#   helm upgrade <langsmith-release> langchain/langsmith --version <your chart version> -n <langsmith-namespace> \
+#     -f <your values> -f langsmith-values.yaml --set-file config.signingJwks=./signing-jwks.json
+# With config.existingSecretName, put the key langsmith_signing_jwks into your secret instead of --set-file.
+# Helm REPLACES lists: if your values already set extraEnv on one of these pods, merge the entries below into yours.
+# Pods that restart once: platform-backend, backend, queue, playground, plus the api-server and queue pods of the add-ons you run.
+
+# 1. Issuer, every pod: the iss claim LangSmith writes into each token. Must equal jwtIssuer in the proxy values.
+config:
+  llmAuthProxyIssuer: "langsmith:self-hosted:<yours>"   # the only placeholder in this file
+
+# 2. Organization entitlement (can_use_llm_auth_proxy): without it the organization setting answers 403.
+#    Per pod rather than commonEnv: the playground pod does not receive commonEnv, and the Fleet pods would get duplicates.
+backend:
+  deployment:
+    extraEnv:
+      - name: DEFAULT_ORG_FEATURE_CAN_USE_LLM_AUTH_PROXY
+        value: "true"
+platformBackend:
+  deployment:
+    extraEnv:
+      - name: DEFAULT_ORG_FEATURE_CAN_USE_LLM_AUTH_PROXY
+        value: "true"
+queue:
+  deployment:
+    extraEnv:
+      - name: DEFAULT_ORG_FEATURE_CAN_USE_LLM_AUTH_PROXY
+        value: "true"
+
+# 3. Playground pod: makes the Playground AND the evaluator (LLM-as-judge) model calls.
+playground:
+  deployment:
+    extraEnv:
+      - name: SSRF_ALLOW_K8S_INTERNAL             # lifts the block on *.svc.cluster.local hosts
+        value: "true"
+      - name: SSRF_ALLOW_PRIVATE_IPS_PLAYGROUND   # the Service ClusterIP is a private address
+        value: "true"
+      - name: LLM_AUTH_PROXY_ACCEPT_HTTP          # otherwise the signed header is attached to https URLs only
+        value: "true"
+
+# 4. Add-ons: the same http gate on each api-server and queue pod. A block is ignored when that add-on is disabled,
+#    so this one file serves every installation.
+#    Fleet: ONLY this variable. The chart already hard-codes the SSRF_* variables on these two pods, and a second copy
+#    fails the render with "Duplicate keys detected".
+fleet:
+  apiServer:
+    deployment:
+      extraEnv:
+        - name: LLM_AUTH_PROXY_ACCEPT_HTTP
+          value: "true"
+  queue:
+    deployment:
+      extraEnv:
+        - name: LLM_AUTH_PROXY_ACCEPT_HTTP
+          value: "true"
+#    Chat (Polly): these pods have no SSRF gate, so this is all they need.
+polly:
+  apiServer:
+    deployment:
+      extraEnv:
+        - name: LLM_AUTH_PROXY_ACCEPT_HTTP
+          value: "true"
+  queue:
+    deployment:
+      extraEnv:
+        - name: LLM_AUTH_PROXY_ACCEPT_HTTP
+          value: "true"
+#    Insights: the same.
+engineInsightsAgent:
+  apiServer:
+    deployment:
+      extraEnv:
+        - name: LLM_AUTH_PROXY_ACCEPT_HTTP
+          value: "true"
+  queue:
+    deployment:
+      extraEnv:
+        - name: LLM_AUTH_PROXY_ACCEPT_HTTP
+          value: "true"
