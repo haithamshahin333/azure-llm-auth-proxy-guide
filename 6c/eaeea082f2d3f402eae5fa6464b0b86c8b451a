@@ -1,0 +1,39 @@
+.gitignore
+  s_370923883e38d2::t_455d2e17c159c7 1-8
+README.md
+  s_370923883e38d2::t_b6eab5ac41086d 1-707
+authz/Dockerfile
+  s_bb73de660c6a1f::t_e91a71f7229721 1-8
+authz/authz.py
+  s_370923883e38d2::t_9cec47cdece553 1-177
+langsmith-values.yaml
+  s_370923883e38d2::t_2ca357879729c1 1-83
+values-client-credentials.yaml
+  s_370923883e38d2::t_be8d047500a153 1-64
+values-workload-identity.yaml
+  s_370923883e38d2::t_5be08a732dc9cc 1-54
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "6ceaeea082f2d3f402eae5fa6464b0b86c8b451a",
+  "prompts": {},
+  "sessions": {
+    "s_370923883e38d2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "667a2624-9b2b-4d11-8581-66e10b34866b",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "haithamshahin333 <42976403+haithamshahin333@users.noreply.github.com>"
+    },
+    "s_bb73de660c6a1f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5939449e-9f50-4b71-926d-10caa5808636",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "haithamshahin333 <42976403+haithamshahin333@users.noreply.github.com>"
+    }
+  }
+}
