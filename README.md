@@ -238,21 +238,53 @@ az role assignment create --role "Cognitive Services OpenAI User" --assignee-pri
 Note two values for step 5: `az identity show -n <identity> -g <rg> --query clientId -o tsv` and
 `az account show --query tenantId -o tsv`. A new principal can take a few minutes to become visible to RBAC.
 
-**Path B: client credentials.** You own the app registration (or the gateway client). Grant its service principal the
-same role and put the client secret in a Kubernetes Secret (the two curl commands in [Two ways](#two-ways-the-proxy-authenticates-to-azure)
-check the identity and role before you install anything), through a file rather than a command-line argument so the
-secret never lands in your shell history:
+**Path B: client credentials.** You own the app registration (or the gateway client). Three things happen here: the
+role, a Kubernetes Secret holding the client secret, and understanding how the proxy reads that Secret. The two curl
+commands in [Two ways](#two-ways-the-proxy-authenticates-to-azure) check the identity and role before you install anything.
 
+Need an app registration first? `az ad app create --display-name langsmith-llm-auth-proxy --query appId -o tsv` gives
+`<client-id>`; then `az ad sp create --id <client-id>` and
+`az ad app credential reset --id <client-id> --append --years 1 --query password -o tsv` (shown once; note the expiry).
+
+*Grant the role:*
 ```bash
 az role assignment create --role "Cognitive Services OpenAI User" --assignee-principal-type ServicePrincipal \
   --assignee-object-id $(az ad sp show --id <client-id> --query id -o tsv) \
   --scope $(az cognitiveservices account show -n <foundry-account> -g <rg> --query id -o tsv)
+```
+
+*Create the Secret.* **You must create it yourself, before step 5; the chart does not.** Put the client secret in a file
+rather than on a command line, so it never lands in your shell history, and delete the file afterwards:
+```bash
 kubectl create namespace <namespace>        # only if the proxy gets its own namespace
 kubectl create secret generic llm-auth-proxy-oauth -n <namespace> --from-file=OAUTH_CLIENT_SECRET=<secret-file>   # a file holding only the secret, chmod 600
+kubectl get secret llm-auth-proxy-oauth -n <namespace> -o jsonpath='{.data.OAUTH_CLIENT_SECRET}' | base64 -d | wc -c   # prints its length, never the value
 ```
-Need an app registration first? `az ad app create --display-name langsmith-llm-auth-proxy --query appId -o tsv` gives
-`<client-id>`; then `az ad sp create --id <client-id>` and
-`az ad app credential reset --id <client-id> --append --years 1 --query password -o tsv` (shown once; note the expiry).
+The Secret's name (`llm-auth-proxy-oauth`) and key (`OAUTH_CLIENT_SECRET`) are fixed by the values file; it must live in the
+proxy's namespace.
+
+*How the proxy picks it up.* Nothing in the chart knows about this Secret. `values-client-credentials.yaml` adds one
+environment variable to the sidecar container that points at it:
+```yaml
+authProxy:
+  deployment:
+    sidecars:
+      - name: authz
+        env:
+          - name: OAUTH_CLIENT_SECRET          # what the sidecar reads
+            valueFrom:
+              secretKeyRef:
+                name: llm-auth-proxy-oauth     # the Secret you just created
+                key: OAUTH_CLIENT_SECRET       # the key inside it
+```
+When the pod starts, Kubernetes resolves that reference and injects the value into the sidecar's environment as
+`OAUTH_CLIENT_SECRET`; only the sidecar container gets it, Envoy never sees it. Finding that variable is how the sidecar
+knows it is on path B. If the Secret or key is missing, the pod stops at `CreateContainerConfigError`. The value is read
+once at start, so a new secret means updating the Secret and restarting the pod (Operations). After step 5 you can see the
+reference in the live Deployment:
+```bash
+kubectl get deploy llm-auth-proxy -n <namespace> -o jsonpath='{.spec.template.spec.containers[?(@.name=="authz")].env[?(@.name=="OAUTH_CLIENT_SECRET")]}'; echo
+```
 
 ### Step 2 (LangSmith): a signing key
 
