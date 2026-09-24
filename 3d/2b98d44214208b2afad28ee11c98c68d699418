@@ -1,0 +1,19 @@
+README.md
+  s_370923883e38d2::t_ca85274fb1ced3 129-159,242-243
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "3d2b98d44214208b2afad28ee11c98c68d699418",
+  "prompts": {},
+  "sessions": {
+    "s_370923883e38d2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "667a2624-9b2b-4d11-8581-66e10b34866b",
+        "model": "claude-fable-5-1"
+      },
+      "human_author": "haithamshahin333 <42976403+haithamshahin333@users.noreply.github.com>"
+    }
+  }
+}
