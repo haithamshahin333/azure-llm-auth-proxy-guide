@@ -1,5 +1,6 @@
 # LangSmith LLM auth proxy -> Azure AI Foundry, authenticating as a user-assigned managed identity (AKS workload identity).
 # Values for the upstream chart langchain/langsmith-auth-proxy (pinned 0.0.15). Fill in every <placeholder>, then:
+#   kubectl create configmap llm-authz-src -n <namespace> --from-file=authz/authz.py     # the sidecar source (no image to build)
 #   helm upgrade --install llm-auth-proxy langchain/langsmith-auth-proxy --version 0.0.15 \
 #     -n <namespace> --create-namespace -f values-workload-identity.yaml --wait --timeout 3m
 # One pod: Envoy validates the LangSmith JWT, asks the sidecar for the upstream Authorization header and forwards the
@@ -30,7 +31,10 @@ authProxy:
       azure.workload.identity/use: "true"      # the AKS webhook injects the projected token and AZURE_* env into every container
     sidecars:
       - name: authz
-        image: "<registry>/langsmith-llm-authz:1"   # built from authz/Dockerfile (README step 4)
+        image: python:3.12-slim                # public image (or your mirror of it); the source is mounted from ConfigMap llm-authz-src (README step 4)
+        command: ["python", "/app/authz.py"]   # nothing is installed: the file uses only the standard library
+        volumeMounts:
+          - { name: authz-src, mountPath: /app, readOnly: true }
         # env:                                 # optional
         #   - name: TOKEN_SCOPE                # token scope, default https://cognitiveservices.azure.com/.default; set it for a
         #     value: "api://<gateway-app-id>/.default"   # sovereign cloud, or to the audience a gateway upstream validates
@@ -48,6 +52,8 @@ authProxy:
         resources:
           requests: { cpu: 50m, memory: 64Mi }
           limits: { memory: 128Mi }
+    volumes:
+      - { name: authz-src, configMap: { name: llm-authz-src } }   # created in README step 4
 ingress:
   enabled: false                               # in-cluster only; see README "Operations" for TLS
 gateway:

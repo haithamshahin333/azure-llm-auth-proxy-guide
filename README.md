@@ -4,12 +4,13 @@
 authenticates to Azure, Azure RBAC decides what it may call, and every model call is logged with the LangSmith workspace,
 user and feature that made it.
 
-This repository is the complete recipe for AKS: a handful of files, no scripts. You build one small container image, add one values
-file to your LangSmith Helm release, install one upstream Helm chart, and finish three settings in the LangSmith UI.
+This repository is the complete recipe for AKS: a handful of files, no scripts, no image to build. You put one small Python
+file into a ConfigMap, add one values file to your LangSmith Helm release, install one upstream Helm chart, and finish three
+settings in the LangSmith UI.
 
 ```
 README.md                        this guide
-authz/authz.py · authz/Dockerfile   the sidecar that obtains Azure tokens (Python standard library only)
+authz/authz.py                   the sidecar that obtains Azure tokens (Python standard library only; runs from a ConfigMap)
 values-workload-identity.yaml    proxy values for path A, managed identity (default)
 values-client-credentials.yaml   proxy values for path B, client id + secret
 langsmith-values.yaml            values overlay for your LangSmith release
@@ -194,8 +195,8 @@ install has one `upstream`, so one Foundry account or gateway per install.
 | Kubernetes | Path A: AKS with OIDC issuer and workload identity enabled (`az aks update -n <aks> -g <rg> --enable-oidc-issuer --enable-workload-identity`). Path B: any cluster. Install the proxy **in the LangSmith namespace** unless you have a reason not to (a separate namespace needs one NetworkPolicy, see Operations). |
 | Azure AI Foundry | An account (kind `AIServices` or `OpenAI`) with a model deployment. Keys may stay disabled. Give the deployment enough throughput: a Fleet agent turn carries a large system prompt and tool schemas, and a small deployment (for example 10K tokens per minute) answers 429 to Fleet calls. |
 | Your Azure permissions | Path A: create a managed identity in the resource group (Contributor). Both paths: assign a role on the Foundry account (Owner or User Access Administrator), or have an admin run that one command. |
-| A container registry | The cluster must be able to pull the sidecar image you build (AKS: `az aks update -n <aks> -g <rg> --attach-acr <registry>`). No registry: see Operations. |
-| Tools | `az` (logged in), `kubectl` (pointed at the cluster), `helm` 3, `docker`, `jq`, and `step` or `openssl` for the signing key. `python3` with `pip` only for the optional end-to-end test in step 7. |
+| Images | Two public images from Docker Hub, nothing to build: `envoyproxy/envoy` (the chart's) and `python:3.12-slim` (the sidecar's runtime). Behind a mirror: `images.registry` for Envoy, the sidecar's `image:` field for Python. |
+| Tools | `az` (logged in), `kubectl` (pointed at the cluster), `helm` 3, `jq`, and `step` or `openssl` for the signing key. `python3` with `pip` only for the optional end-to-end test in step 7. |
 | Who does what | Steps 1, 4, 5: Azure and cluster admin. Steps 2, 3: whoever runs the LangSmith Helm upgrades. Step 6: a LangSmith **organization admin** in the UI. Step 7: anyone with cluster access. |
 
 ## The install at a glance
@@ -205,7 +206,7 @@ install has one `upstream`, so one Foundry account or gateway per install.
 | Azure | 1 | the identity the proxy uses, with the inference role on Foundry | a few `az` commands (A), or one `az` + one `kubectl` (B) |
 | LangSmith | 2 | a signing key so LangSmith can sign requests | a few `step` or `openssl` commands |
 | LangSmith | 3 | LangSmith learns the issuer, gets the key, and is allowed to call an http Service inside the cluster | `helm upgrade` of **your** release with `langsmith-values.yaml` |
-| Proxy | 4 | the sidecar image | `docker build` + `docker push` |
+| Proxy | 4 | the sidecar's source goes into the cluster | one `kubectl create configmap` |
 | Proxy | 5 | Envoy + sidecar as one pod, Service `llm-auth-proxy` | `helm upgrade --install` of the upstream chart with one values file |
 | LangSmith | 6 | feature on for the organization, a placeholder secret, a model configuration pointing at the proxy | three screens in the UI |
 | Both | 7 | prove it | a test call, a Playground prompt, the proxy log |
@@ -449,13 +450,26 @@ kubectl get cm <langsmith-release>-config -n <langsmith-namespace> -o jsonpath='
 The first prints `{"keys":[{"kty":"OKP","crv":"Ed25519",…}]}` with no `d` field (an empty key list means platform-backend
 started before the key existed: restart it). The second prints your issuer.
 
-### Step 4 (proxy): the sidecar image
+### Step 4 (proxy): the sidecar source as a ConfigMap
 
 ```bash
-docker build --platform linux/amd64 -t <registry>/langsmith-llm-authz:1 authz/
-docker push <registry>/langsmith-llm-authz:1
+kubectl create namespace <namespace>                                                # skip if it exists (path B made it in step 1)
+kubectl create configmap llm-authz-src -n <namespace> --from-file=authz/authz.py
 ```
-`python:3.12-slim` plus one file; nothing is installed. Rebuild only when `authz/authz.py` changes.
+The sidecar is the public `python:3.12-slim` image running this one file, mounted read-only at `/app`. The file uses only
+the Python standard library, so nothing is installed at start and there is no image to build or registry to attach. The
+ConfigMap is read once when the container starts; it costs nothing per request. When you change `authz/authz.py` later,
+re-create the ConfigMap (`kubectl create configmap … --dry-run=client -o yaml | kubectl apply -f -`) and run
+`kubectl rollout restart -n <namespace> deploy/llm-auth-proxy`, because a ConfigMap change does not roll the pod by itself.
+Clusters that pull only from a private registry mirror `python:3.12-slim` there and point the sidecar's `image:` at the
+mirror; the ConfigMap route stays the same.
+
+**Check** that the file landed under the key the values file expects (`authz.py`):
+```bash
+kubectl get configmap llm-authz-src -n <namespace> -o jsonpath='{.data.authz\.py}' | head -1     # prints the file's first line
+```
+GitOps: generate the manifest once with `--dry-run=client -o yaml > llm-authz-src.yaml` and commit it next to the values
+file; the ConfigMap must exist in `<namespace>` before the chart's pod starts.
 
 ### Step 5 (proxy): install the chart
 
@@ -468,17 +482,21 @@ This kit provides only the values file. With it, chart 0.0.15 creates four objec
 
 | Object | What it is |
 |---|---|
-| Deployment | one pod with two containers: `envoy` (the chart's own, image `envoyproxy/envoy:v1.37-latest`, listening on 10000) and `authz` (the sidecar from step 4, on `localhost:10002`) |
+| Deployment | one pod with two containers: `envoy` (the chart's own, image `envoyproxy/envoy:v1.37-latest`, listening on 10000) and `authz` (`python:3.12-slim` running the file from step 4, on `localhost:10002`) |
 | ConfigMap | the Envoy configuration the chart generates from your values: token check, `ext_authz` call to the sidecar, route to `upstream` |
 | Service | `llm-auth-proxy:10000`, the address LangSmith calls |
 | ServiceAccount | the pod's identity; path A annotates it for workload identity |
+
+The pod also mounts the ConfigMap `llm-authz-src` from step 4. That object is yours, not the chart's: `helm uninstall`
+leaves it, and Teardown deletes it explicitly.
 
 The values file has five parts, top to bottom: `fullnameOverride: llm` so every object is called `llm-auth-proxy` (the
 chart appends `-auth-proxy`); the
 `authProxy` settings the chart was built for (upstream, issuer, audience, JWKS address, `extAuthz` pointing at
 `http://localhost:10002`); the ServiceAccount annotations and pod label for workload identity (path A only); the sidecar
-container under `authProxy.deployment.sidecars` (image, env, port, readiness probe, resources), which is how the chart lets
-you add your own container to its pod; and `ingress`/`gateway` off because LangSmith reaches the Service directly.
+container under `authProxy.deployment.sidecars` (image, command, the ConfigMap mount, env, port, readiness probe,
+resources), which is how the chart lets you add your own container to its pod, with the matching `volumes` entry; and
+`ingress`/`gateway` off because LangSmith reaches the Service directly.
 Everything not in the file keeps the chart's default. To add the repository, see the defaults, or preview exactly what
 will be created:
 
@@ -497,7 +515,6 @@ in the placeholders; each has a comment saying where the value comes from:
 
 | Placeholder | Value | Path |
 |---|---|---|
-| `<registry>/langsmith-llm-authz:1` | the image from step 4 | both |
 | `<foundry-account>` | your Foundry account name (`upstream` = `https://<foundry-account>.openai.azure.com`; a gateway URL instead if one fronts Foundry) | both |
 | `langsmith:self-hosted:<yours>` | the issuer from step 3, exactly | both |
 | `jwtAudiences: ["llm-auth-proxy"]` | keep, or change together with the organization setting in step 6 | both |
@@ -667,10 +684,10 @@ are not needed and the allowed URL is the public host.
   the sidecar's 10002 refuses token requests from other pods, but nothing needs to reach it). Egress the pod needs:
   Envoy → the LangSmith frontend `:80` (public key), Envoy → Foundry `:443`, sidecar → `login.microsoftonline.com:443`
   (or your token endpoint).
-- **No registry**: ship the sidecar source as a ConfigMap: `kubectl create configmap llm-authz-src -n <namespace> --from-file=authz/authz.py`,
-  then in the values file set `image: python:3.12-slim`, add `command: ["python", "/app/authz.py"]` and
-  `volumeMounts: [{name: authz-src, mountPath: /app, readOnly: true}]` to the sidecar, and
-  `volumes: [{name: authz-src, configMap: {name: llm-authz-src}}]` under `deployment`.
+- **Update the sidecar** (a newer `authz/authz.py` from this repository): re-create the ConfigMap
+  (`kubectl create configmap llm-authz-src -n <namespace> --from-file=authz/authz.py --dry-run=client -o yaml | kubectl apply -f -`)
+  and `kubectl rollout restart -n <namespace> deploy/llm-auth-proxy`. The new pod passes the readiness gate before the old
+  one is removed, so a broken file cannot take the proxy down: the rollout just stalls and the sidecar log says why.
 - **Capacity**: one replica by default; the official guidance for production is at least three
   (`authProxy.deployment.replicas`, or `authProxy.autoscaling.hpa` with `minReplicas: 3`). Each replica caches its own
   token and refreshes it before expiry.
@@ -699,6 +716,9 @@ are not needed and the allowed URL is the public host.
   `refused token request` log line. If you ever change that, verify the token in the sidecar too. Its per-call log line
   carries the forwarded headers with credentials redacted; set `LOG_HEADERS=false` if header values count as sensitive for
   you.
+- The sidecar's code is the ConfigMap `llm-authz-src`: whoever may edit ConfigMaps in `<namespace>` can change what runs
+  next to Envoy (after a pod restart). Keep write access to that namespace as tight as for the proxy's Deployment itself,
+  The file holds no secrets.
 - Path B: the client secret lives in the Kubernetes Secret and the sidecar's environment. The sidecar never logs it or the
   tokens it obtains; token-endpoint failures are logged as the OAuth error code plus a truncated description.
 - With *Allow all*, the signed token accompanies every model call LangSmith's proxy-aware features make. It is only
@@ -714,7 +734,9 @@ are not needed and the allowed URL is the public host.
 | sidecar log `AADSTS500011` / `invalid_scope` | `OAUTH_SCOPE` / `TOKEN_SCOPE` is not a resource this endpoint knows (Entra: `https://cognitiveservices.azure.com/.default`). |
 | sidecar log `no credentials: neither …` | A: pod label `azure.workload.identity/use` or the ServiceAccount annotations missing, or the workload identity webhook is not installed. B: the Secret is not referenced. |
 | pod `CreateContainerConfigError` | Secret `llm-auth-proxy-oauth` or its key `OAUTH_CLIENT_SECRET` does not exist in `<namespace>`. |
-| pod `ImagePullBackOff` | The cluster cannot pull `<registry>/langsmith-llm-authz` (attach the registry) or `envoyproxy/envoy` from docker.io (set `images.registry` to a mirror). |
+| pod `ImagePullBackOff` | The cluster cannot pull `python:3.12-slim` or `envoyproxy/envoy` from Docker Hub: point the sidecar's `image:` and the chart's `images.registry` at your mirror. |
+| pod stuck `ContainerCreating`, event `configmap "llm-authz-src" not found` | Step 4 was skipped or run in another namespace. |
+| sidecar log `can't open file '/app/authz.py'` | The ConfigMap key is not `authz.py`: create it with `--from-file=authz/authz.py` (the key is the file name). |
 | `/.well-known/jwks.json` is empty | platform-backend started before the key existed: `kubectl rollout restart deploy/<langsmith-release>-platform-backend`. |
 | organization setting: `403` on save | Entitlement not live: the step 3 upgrade did not roll backend and platform-backend, or another `-f` file replaced the `extraEnv` list. Or the user is not an organization admin. |
 | Playground: `SSRF blocked: Kubernetes internal DNS` | Playground `extraEnv` missing (step 3). |
@@ -734,6 +756,7 @@ are not needed and the allowed URL is the public host.
 
 ```bash
 helm uninstall llm-auth-proxy -n <namespace>
+kubectl delete configmap llm-authz-src -n <namespace>
 kubectl delete secret llm-auth-proxy-oauth -n <namespace>                   # path B
 kubectl delete networkpolicy llm-auth-proxy-jwks -n <langsmith-namespace>   # if you created it
 az identity delete -n <identity> -g <rg>                                    # path A (the federated credential goes with it)
@@ -752,6 +775,7 @@ above), Envoy access logging, alerting.
 ## Tested with
 
 LangSmith Helm chart 0.16.31 and 0.17.0-rc.36, `langsmith-auth-proxy` chart 0.0.15 (Envoy 1.37).
+Sidecar run from the ConfigMap on `python:3.12-slim`; both authentication paths; container start to listening under one second.
 
 ## Alternative without a proxy
 
