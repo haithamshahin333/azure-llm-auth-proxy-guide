@@ -1,0 +1,23 @@
+README.md
+  s_a4283a573073c8::t_f38fe007fa37e0 7-9,13,198-199,209,453,456-457,459-472,485,490-492,497-499,687-690,719-721,737-739,759,778
+values-client-credentials.yaml
+  s_a4283a573073c8::t_b3fdeafb48091f 7,33-36,65-66
+values-workload-identity.yaml
+  s_a4283a573073c8::t_c6c9fa873b9f0b 3,34-37,55-56
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "bb01a47a0855b3c32acfd1e89f3a9b27d1ce072d",
+  "prompts": {},
+  "sessions": {
+    "s_a4283a573073c8": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1d65bf0d-45d5-4fef-81a5-c0d7ff3e4100",
+        "model": "unknown"
+      },
+      "human_author": "haithamshahin333 <42976403+haithamshahin333@users.noreply.github.com>"
+    }
+  }
+}
